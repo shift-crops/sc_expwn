@@ -97,26 +97,64 @@ class ELF(pwnlib.elf.elf.ELF):
             if '/libc.' in lib or '/libc-' in lib:
                 return ELF(lib)
 
+class Communicate:
+    def __init__(self, mode='SOCKET', *args, **kwargs):
+        self.mode = mode
+        self.args = args
+        self.kwargs = kwargs
+        self.conn = None
+
+        self.debug = mode == 'DEBUG'
+
+    def connect(self):
+        if self.conn is not None:
+            self.conn.close()
+
+        if self.debug:
+            if 'argv' in self.kwargs:
+                argv = self.kwargs['argv']
+                del self.kwargs['argv']
+            else:
+                argv = './argv'
+            conn = gdb.debug(argv, *self.args, **self.kwargs)
+        elif self.mode == 'SOCKET':
+            conn = remote(*self.args, **self.kwargs)
+        elif self.mode == 'PROC':
+            conn = process(*self.args, **self.kwargs)
+        else:
+            warn('communicate : self.mode "%s" is not defined' % self.mode)
+            conn = None
+
+        self.conn = conn
+        return conn
+
+    def run(self, func, **kwargs):
+        return func(self.conn, **kwargs)
+
+    def bruteforce(self, func, **kwargs):
+        if self.debug:
+            warn('bruteforce : disabled bruteforce in debug mode')
+            self.run(func, **kwargs)
+        else:
+            while True:
+                try:
+                    self.run(func, **kwargs)
+                except:
+                    self.connect()
+                else:
+                    break
+
+    @property
+    def connection(self):
+        return self.conn
+
 def init():
     if 'TMUX' in os.environ:
         if 'DISPLAY' in os.environ:
             del os.environ['DISPLAY']
 
 def communicate(mode='SOCKET', *args, **kwargs):
-    if mode == 'SOCKET':
-        conn = remote(*args, **kwargs)
-    elif mode == 'PROC':
-        conn = process(*args, **kwargs)
-    elif mode == 'DEBUG':
-        if 'argv' in kwargs:
-            argv = kwargs['argv']
-            del kwargs['argv']
-        else:
-            argv = './argv'
-        conn = gdb.debug(argv, *args, **kwargs)
-    else:
-        warn('communicate : mode "%s" is not defined' % mode)
-
-    return conn
+    comn = Communicate(mode, *args, **kwargs)
+    return comn.connect()
 
 init()
