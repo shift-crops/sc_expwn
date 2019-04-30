@@ -106,11 +106,14 @@ class Communicate:
 
         self.debug = mode == 'DEBUG'
 
+    def __del(self):
+        self.conn.close()
+
     def connect(self):
         if self.conn is not None:
             self.conn.close()
 
-        if self.debug:
+        if self.mode == 'DEBUG':
             if 'argv' in self.kwargs:
                 argv = self.kwargs['argv']
                 del self.kwargs['argv']
@@ -121,6 +124,15 @@ class Communicate:
             conn = remote(*self.args, **self.kwargs)
         elif self.mode == 'PROC':
             conn = process(*self.args, **self.kwargs)
+        elif self.mode == 'SSH':
+            need_shell = False
+            if 'raw' in self.kwargs:
+                need_shell = self.kwargs['raw']
+                del self.kwargs['raw']
+
+            conn = ssh(*self.args, **self.kwargs)
+            if need_shell:
+                conn = conn.shell()
         else:
             warn('communicate : self.mode "%s" is not defined' % self.mode)
             conn = None
@@ -148,13 +160,14 @@ class Communicate:
     def connection(self):
         return self.conn
 
+# for backward compatibility
+def communicate(mode='SOCKET', *args, **kwargs):
+    comn = Communicate(mode, *args, **kwargs)
+    return comn.connect()
+
 def init():
     if 'TMUX' in os.environ:
         if 'DISPLAY' in os.environ:
             del os.environ['DISPLAY']
-
-def communicate(mode='SOCKET', *args, **kwargs):
-    comn = Communicate(mode, *args, **kwargs)
-    return comn.connect()
 
 init()
