@@ -102,16 +102,16 @@ class Communicate:
         self.mode = mode
         self.args = args
         self.kwargs = kwargs
-        self.conn = None
+        self._conn = None
 
         self.debug = mode == 'DEBUG'
 
     def __del(self):
-        self.conn.close()
+        self._conn.close()
 
     def connect(self):
-        if self.conn is not None:
-            self.conn.close()
+        if self._conn is not None:
+            self._conn.close()
 
         if self.mode == 'DEBUG':
             if 'argv' in self.kwargs:
@@ -137,11 +137,11 @@ class Communicate:
             warn('communicate : self.mode "%s" is not defined' % self.mode)
             conn = None
 
-        self.conn = conn
+        self._conn = conn
         return conn
 
     def run(self, func, **kwargs):
-        return func(self.conn, **kwargs)
+        return func(self._conn, **kwargs)
 
     def bruteforce(self, func, **kwargs):
         if self.debug:
@@ -156,9 +156,31 @@ class Communicate:
                 else:
                     break
 
+    def repeat(self, func, break_lv, *args, **kwargs):
+        arg = kwargs['arg'] if 'arg' in kwargs else []
+        level = len(arg)
+        nests = len(args)
+
+        for x in args[0]:
+            kwargs['arg'] = arg + [x]
+            try:
+                if nests > 1:
+                    self.repeat(func, break_lv, *args[1:], **kwargs)
+                else:
+                    self.run(func, **kwargs)
+            except Exception as e:
+                if level > break_lv:
+                    raise e
+                else:
+                    self.connect()
+            else:
+                if level >= break_lv:
+                    self.connect()
+                    break
+
     @property
     def connection(self):
-        return self.conn
+        return self._conn
 
 # for backward compatibility
 def communicate(mode='SOCKET', *args, **kwargs):
