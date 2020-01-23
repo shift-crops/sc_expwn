@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from pwn import *
 from pwnlib.elf.elf import dotdict
+from itertools import product
 import os
 
 p = lambda x: pack(x)
@@ -44,36 +45,42 @@ class Environment:
         self.__env = env
 
     def check(self, env):
-        return self.__env == env
+        return self.__env in env if type(env) in [list, tuple] else self.__env == env
 
 class Communicate:
-    def __init__(self, mode='SOCKET', *args, **kwargs):
-        self.mode = mode
+    def __init__(self, mode, *args, **kwargs):
+        self.__conn = None
+
         self.args = args
         self.kwargs = kwargs
-        self._conn = None
+        self.__mode = mode
+        self.__debug = (mode == 'DEBUG')
 
-        self.debug = mode == 'DEBUG'
+        self.quiet = False
 
     def __del(self):
-        self._conn.close()
+        self.close()
 
     def connect(self):
-        if self._conn is not None:
-            self._conn.close()
+        l_lv = context.log_level
+        if self.quiet:
+            context.log_level = 100
 
-        if self.mode == 'DEBUG':
+        if self.__conn is not None:
+            self.close()
+
+        if self.__mode == 'DEBUG':
             if 'argv' in self.kwargs:
                 argv = self.kwargs['argv']
                 del self.kwargs['argv']
             else:
                 argv = './argv'
             conn = gdb.debug(argv, *self.args, **self.kwargs)
-        elif self.mode == 'SOCKET':
+        elif self.__mode == 'SOCKET':
             conn = remote(*self.args, **self.kwargs)
-        elif self.mode == 'PROC':
+        elif self.__mode == 'PROC':
             conn = process(*self.args, **self.kwargs)
-        elif self.mode == 'SSH':
+        elif self.__mode == 'SSH':
             need_shell = False
             if 'raw' in self.kwargs:
                 need_shell = self.kwargs['raw']
@@ -83,53 +90,71 @@ class Communicate:
             if need_shell:
                 conn = conn.shell()
         else:
-            warn('communicate : self.mode "%s" is not defined' % self.mode)
+            warn('communicate : mode "%s" is not defined' % self.__mode)
             conn = None
 
-        self._conn = conn
+        self.__conn = conn
+        context.log_level = l_lv
+
         return conn
 
+    def close(self):
+        if self.__conn is None:
+            return
+
+        l_lv = context.log_level
+        if self.quiet:
+            context.log_level = 100
+        self.__conn.close()
+        context.log_level = l_lv
+
     def run(self, func, **kwargs):
-        return func(self._conn, **kwargs)
+        return func(self.__conn, **kwargs)
 
     def bruteforce(self, func, **kwargs):
-        if self.debug:
+        if self.__debug:
             warn('bruteforce : disabled bruteforce in debug mode')
-            self.run(func, **kwargs)
-        else:
-            while True:
-                try:
-                    self.run(func, **kwargs)
-                except:
-                    self.connect()
-                else:
-                    break
+            return self.run(func, **kwargs)
 
-    def repeat(self, func, break_lv, *args, **kwargs):
-        arg = kwargs['arg'] if 'arg' in kwargs else []
-        level = len(arg)
-        nests = len(args)
-
-        for x in args[0]:
-            kwargs['arg'] = arg + [x]
+        while True:
             try:
-                if nests > 1:
-                    self.repeat(func, break_lv, *args[1:], **kwargs)
-                else:
-                    self.run(func, **kwargs)
-            except Exception as e:
-                if level > break_lv:
-                    raise e
-                else:
-                    self.connect()
+                self.run(func, **kwargs)
+            except:
+                self.connect()
             else:
-                if level >= break_lv:
-                    self.connect()
-                    break
+                break
+
+    def repeat(self, func, succend, *args, **kwargs):
+        rep_result = []
+
+        for x in product(*args):
+            kwargs['rep_argl'] = x
+            try:
+                self.run(func, **kwargs)
+            except:
+                pass
+            else:
+                if succend:
+                    return x
+                rep_result += [x]
+            self.connect()
+
+        return rep_result
+
+    def repeat_depth(self, func, depth, *args, **kwargs):
+        rep_result = []
+        for x in product(*args[:depth]):
+            kwargs['rep_argh'] = x
+            rep_result += [[x, self.repeat(func, True, *args[depth:], **kwargs)]]
+            self.connect()
+        return rep_result
+
+    def interactive(self, **kwargs):
+        self.__conn.interactive(**kwargs)
 
     @property
     def connection(self):
-        return self._conn
+        return self.__conn
 
 #==========
 
@@ -184,25 +209,27 @@ class ELF(pwnlib.elf.elf.ELF):
                 return ELF(lib)
 
 class DlRuntime:
-    def __init__(self, elf):
+    def __init__(self, elf, libc = None):
         self._elf  = elf if isinstance(elf, ELF) else ELF(elf)
+        self._libc = self._elf.libc if libc is None else libc if isinstance(libc, ELF) else ELF(libc)
         self._arch = 64 if context.arch in ['x86_64','amd64'] else 32 if context.arch in ['x86', 'i386'] else 0
 
-    def lookup(self, avoid_version = False):
-        return self.Lookup(self, avoid_version)
+    def lookup(self, **kwargs):
+        return self.Lookup(self, **kwargs)
 
-    def delta(self, base = None):
-        return self.Delta(self, base)
+    def delta(self, **kwargs):
+        return self.Delta(self, **kwargs)
 
     class Lookup:
         def __init__(self, elf, avoid_version = False):
             self.__dlr  = elf if isinstance(elf, DlRuntime) else DlRuntime(elf)
             elf         = self.__dlr._elf
 
-            self.__addr_dynsym  = elf.sep_section['.dynsym']
-            self.__addr_dynstr  = elf.sep_section['.dynstr']
-            self.__addr_relplt  = elf.sep_section['.rela.plt' if self.__arch == 64 else '.rel.plt']
-            self.__addr_version = None if avoid_version else elf.sep_section['.gnu.version']
+            self.__addr             = dict()
+            self.__addr['dynsym']   = elf.sep_section['.dynsym']
+            self.__addr['dynstr']   = elf.sep_section['.dynstr']
+            self.__addr['relplt']   = elf.sep_section['.rela.plt' if self.__arch == 64 else '.rel.plt']
+            self.__addr['version']  = None if avoid_version else elf.sep_section['.gnu.version']
 
             self.__reloc_offset = {}
             self.__sym_reloc    = {}
@@ -229,11 +256,11 @@ class DlRuntime:
             align = 0x18 if self.__arch == 64 else 0x10
 
             addr_buf_dynsym      = addr_buf_dynstr + len(dynstr)
-            pad_dynsym           = (align - (addr_buf_dynsym - self.__addr_dynsym) % align) % align
+            pad_dynsym           = (align - (addr_buf_dynsym - self.__addr['dynsym']) % align) % align
             addr_buf_dynsym     += pad_dynsym
 
             for s,ofs in d.items():
-                dynsym  += p32(addr_buf_dynstr + ofs - self.__addr_dynstr)
+                dynsym  += p32(addr_buf_dynstr + ofs - self.__addr['dynstr'])
                 if self.__arch == 64:
                     dynsym  += p32(0x12)
                     dynsym  += p64(0)
@@ -244,24 +271,24 @@ class DlRuntime:
                     dynsym  += p32(0x12)
 
             addr_buf_relplt      = addr_buf_dynsym + len(dynsym)
-            pad_relplt           = ((0x18-(addr_buf_relplt - self.__addr_relplt)%0x18)%0x18) if self.__arch == 64 else 0
+            pad_relplt           = ((0x18-(addr_buf_relplt - self.__addr['relplt'])%0x18)%0x18) if self.__arch == 64 else 0
             addr_buf_relplt     += pad_relplt
 
-            r_info = (addr_buf_dynsym - self.__addr_dynsym) / align
-            if self.__addr_version is not None:
-                debug('DlRuntime : check gnu version : [0x%08x] & 0x7fff' % (self.__addr_version + r_info*2))
+            r_info = (addr_buf_dynsym - self.__addr['dynsym']) / align
+            if self.__addr['version'] is not None:
+                debug('DlRuntime : check gnu version : [0x%08x] & 0x7fff' % (self.__addr['version'] + r_info*2))
             else:
                 debug('DlRuntime : check if link_map->l_info[VERSYMIDX (DT_VERSYM)] == NULL (offset : %x)' % (0x1c8 if self.__arch == 64 else 0xe4))
 
             for s,a in self.__sym_reloc.items():
                 if self.__arch == 64:
-                    self.__reloc_offset.update({s : (addr_buf_relplt + len(relplt) -self.__addr_relplt)/0x18})
+                    self.__reloc_offset.update({s : (addr_buf_relplt + len(relplt) -self.__addr['relplt'])/0x18})
                     relplt  += p64(a)
                     relplt  += p32(0x7)
                     relplt  += p32(r_info)
                     relplt  += p64(0)
                 elif self.__arch == 32:
-                    self.__reloc_offset.update({s : addr_buf_relplt + len(relplt) -self.__addr_relplt})
+                    self.__reloc_offset.update({s : addr_buf_relplt + len(relplt) -self.__addr['relplt']})
                     relplt  += p32(a)
                     relplt  += p32(r_info << 8 | 0x7)
                 r_info  += 1
@@ -282,19 +309,19 @@ class DlRuntime:
             return self.__reloc_offset
 
     class Delta:
-        def __init__(self, elf, base = None):
-            self.__dlr  = elf if isinstance(elf, DlRuntime) else DlRuntime(elf)
+        def __init__(self, elf, libc = None, base = '__libc_start_main'):
+            self.__dlr  = elf if isinstance(elf, DlRuntime) else DlRuntime(elf, libc)
             elf         = self.__dlr._elf
-            libc        = elf.libc
+            libc        = self.__dlr._libc
 
-            if base is not None:
-                self.addr_got_basefunc  = elf.got[base]
-                self.addr_basefunc      = libc.sep_function[base]
+            self.addr_got_basefunc  = elf.got[base]
+            self.addr_basefunc      = libc.sep_function[base]
 
-            self.__addr_gotplt  = elf.sep_section['.got.plt']
-            self.__got          = elf.got
-            self.__function     = libc.sep_function
-            self.__payload      = ''
+            self.__addr             = dict()
+            self.__addr['gotplt']   = elf.sep_section['.got.plt']
+            self.__got              = elf.got
+            self.__function         = libc.sep_function
+            self.__payload          = ''
 
         @property
         def __arch(self):
@@ -303,9 +330,9 @@ class DlRuntime:
         def set_victim(self, victim):
             self.addr_got_victim    = self.__got[victim]
             if self.__arch == 64:
-                self.reloc_offset       = (self.addr_got_victim - (self.__addr_gotplt+0x18))/8
+                self.reloc_offset       = (self.addr_got_victim - (self.__addr['gotplt']+0x18))/8
             else:
-                self.reloc_offset       = (self.addr_got_victim - (self.__addr_gotplt+0xc))*2
+                self.reloc_offset       = (self.addr_got_victim - (self.__addr['gotplt']+0xc))*2
 
         def resolve(self, addr_buf, target, suffix = False):
             delta               = self.__function[target] - self.addr_basefunc
@@ -323,7 +350,7 @@ class DlRuntime:
             link_map += p(addr_reloc)
 
             symtab  = p(6)
-            symtab += p(self.addr_got_basefunc - (8 if self.__arch == 64 else 4))   # .dynsym
+            symtab += p(self.addr_got_basefunc - (8 if self.__arch == 64 else 4))               # .dynsym
             symtab  = symtab.ljust(0x10, '\x00')
 
             debug('DlRuntime : check sym->st_other (0x%08x)' % (self.addr_got_basefunc + (-3 if self.__arch == 64 else 0x9)))
