@@ -1,11 +1,12 @@
-#!/usr/bin/env python
 from pwn import *
 from pwnlib.elf.elf import dotdict
 from itertools import product
-import os
 
-p = lambda x: pack(x)
-u = lambda x: unpack(x, len(x)*8)
+context(terminal=['tmux', 'splitw', '-v'])
+
+p = lambda x: pack(x, 'all')
+u = lambda x: unpack(x, 'all')
+invsign = lambda x: unpack(pack(x, 'all'), 'all', signed = x>0)
 
 class Environment:
     def __init__(self, *envs):
@@ -15,8 +16,8 @@ class Environment:
             setattr(self, env, dict())
 
     def set_item(self, name, **obj):
-        if obj.keys()!=self.env_list:
-            fail('Environment : "%s" environment does not match' % name)
+        if set(obj.keys()) != set(self.env_list):
+            error('Environment : "%s" environment does not match' % name)
             return
 
         for env in obj:
@@ -28,7 +29,7 @@ class Environment:
             env = None
 
         while env is None:
-            sel = raw_input('Select Environment\n%s ...' % str(self.env_list)).strip()
+            sel = raw_input('Select Environment\n%s ...' % str(self.env_list)).strip().decode('utf8')
             if not sel:
                 env = self.env_list[0]
             elif sel in self.env_list:
@@ -145,8 +146,10 @@ class Communicate:
         rep_result = []
         for x in product(*args[:depth]):
             kwargs['rep_argh'] = x
-            rep_result += [[x, self.repeat(func, True, *args[depth:], **kwargs)]]
-            self.connect()
+            res = self.repeat(func, True, *args[depth:], **kwargs)
+            if res:
+                rep_result += [[x, res]]
+                self.connect()
         return rep_result
 
     def interactive(self, **kwargs):
@@ -246,12 +249,12 @@ class DlRuntime:
             assert(self.__arch in [64, 32])
 
             d = {}
-            dynstr = dynsym = relplt = ''
+            dynstr = dynsym = relplt = b''
 
             addr_buf_dynstr = addr_buf
             for s,a in self.__sym_reloc.items():
                 d.update({s:len(dynstr)})
-                dynstr += s+'\x00'
+                dynstr += s.encode('utf8') + b'\x00'
 
             align = 0x18 if self.__arch == 64 else 0x10
 
@@ -274,7 +277,7 @@ class DlRuntime:
             pad_relplt           = ((0x18-(addr_buf_relplt - self.__addr['relplt'])%0x18)%0x18) if self.__arch == 64 else 0
             addr_buf_relplt     += pad_relplt
 
-            r_info = (addr_buf_dynsym - self.__addr['dynsym']) / align
+            r_info = int((addr_buf_dynsym - self.__addr['dynsym']) / align)
             if self.__addr['version'] is not None:
                 debug('DlRuntime : check gnu version : [0x%08x] & 0x7fff' % (self.__addr['version'] + r_info*2))
             else:
@@ -282,7 +285,7 @@ class DlRuntime:
 
             for s,a in self.__sym_reloc.items():
                 if self.__arch == 64:
-                    self.__reloc_offset.update({s : (addr_buf_relplt + len(relplt) -self.__addr['relplt'])/0x18})
+                    self.__reloc_offset.update({s : int((addr_buf_relplt + len(relplt) -self.__addr['relplt'])/0x18)})
                     relplt  += p64(a)
                     relplt  += p32(0x7)
                     relplt  += p32(r_info)
@@ -298,7 +301,7 @@ class DlRuntime:
             if pad_relplt:
                 debug('DlRuntime : Auto padding relplt size is 0x%d bytes' % pad_relplt)
 
-            self.__payload =  dynstr + '@'*(pad_dynsym) + dynsym + '@'*(pad_relplt) + relplt
+            self.__payload =  dynstr + b'@'*(pad_dynsym) + dynsym + b'@'*(pad_relplt) + relplt
 
         @property
         def reloc_payload(self):
@@ -330,7 +333,7 @@ class DlRuntime:
         def set_victim(self, victim):
             self.addr_got_victim    = self.__got[victim]
             if self.__arch == 64:
-                self.reloc_offset       = (self.addr_got_victim - (self.__addr['gotplt']+0x18))/8
+                self.reloc_offset       = int((self.addr_got_victim - (self.__addr['gotplt']+0x18))/8)
             else:
                 self.reloc_offset       = (self.addr_got_victim - (self.__addr['gotplt']+0xc))*2
 
@@ -342,24 +345,24 @@ class DlRuntime:
             addr_relplt         = addr_reloc    + 0x10
             addr_strtab         = addr_buf      # readable anyware
 
-            link_map  = p(delta)
-            link_map  = link_map.ljust(0x68 if self.__arch == 64 else 0x34, '\x00')
-            link_map += p(addr_strtab)
-            link_map += p(addr_symtab)
-            link_map  = link_map.ljust(0xf8 if self.__arch == 64 else 0x7c, '\x00')
-            link_map += p(addr_reloc)
+            link_map  = pack(delta)
+            link_map  = link_map.ljust(0x68 if self.__arch == 64 else 0x34, b'\x00')
+            link_map += pack(addr_strtab)
+            link_map += pack(addr_symtab)
+            link_map  = link_map.ljust(0xf8 if self.__arch == 64 else 0x7c, b'\x00')
+            link_map += pack(addr_reloc)
 
-            symtab  = p(6)
-            symtab += p(self.addr_got_basefunc - (8 if self.__arch == 64 else 4))               # .dynsym
-            symtab  = symtab.ljust(0x10, '\x00')
+            symtab  = pack(6)
+            symtab += pack(self.addr_got_basefunc - (8 if self.__arch == 64 else 4))                # .dynsym
+            symtab  = symtab.ljust(0x10, b'\x00')
 
             debug('DlRuntime : check sym->st_other (0x%08x)' % (self.addr_got_basefunc + (-3 if self.__arch == 64 else 0x9)))
 
-            reloc   = p(0x17)
-            reloc  += p(addr_relplt - self.reloc_offset * (0x18 if self.__arch == 64 else 1))   # .rela.plt
-            reloc   = reloc.ljust(0x10, '\x00')
+            reloc   = pack(0x17)
+            reloc  += pack(addr_relplt - self.reloc_offset * (0x18 if self.__arch == 64 else 1))    # .rela.plt
+            reloc   = reloc.ljust(0x10, b'\x00')
 
-            relplt  = p(self.addr_got_victim - delta)
+            relplt  = pack(self.addr_got_victim - delta)
             relplt += p32(0x7)
             if self.__arch == 64:
                 relplt += p32(0)
@@ -378,9 +381,3 @@ def communicate(mode='SOCKET', *args, **kwargs):
     comn = Communicate(mode, *args, **kwargs)
     return comn.connect()
 
-def init():
-    if 'TMUX' in os.environ:
-        if 'DISPLAY' in os.environ:
-            del os.environ['DISPLAY']
-
-init()
