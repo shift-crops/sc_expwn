@@ -82,14 +82,13 @@ class Communicate:
         elif self.__mode == 'PROC':
             conn = process(*self.args, **self.kwargs)
         elif self.__mode == 'SSH':
-            need_shell = False
-            if 'raw' in self.kwargs:
-                need_shell = self.kwargs['raw']
-                del self.kwargs['raw']
+            cmd = None
+            if 'run' in self.kwargs:
+                cmd = self.kwargs['run']
+                del self.kwargs['run']
 
-            conn = ssh(*self.args, **self.kwargs)
-            if need_shell:
-                conn = conn.shell()
+            s = ssh(*self.args, **self.kwargs)
+            conn = s.run(cmd) if cmd is not None else s.shell()
         else:
             warn('communicate : mode "%s" is not defined' % self.__mode)
             conn = None
