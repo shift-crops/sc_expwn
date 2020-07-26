@@ -8,6 +8,9 @@ p = lambda x: pack(x, 'all')
 u = lambda x: unpack(x, 'all')
 invsign = lambda x: unpack(pack(x, 'all'), 'all', signed = x>0)
 
+protect_ptr = lambda x, pdiff = 0: XORShift.encRight(x, 12) ^ pdiff
+reveal_ptr  = lambda x: XORShift.decRight(x, 12) & ~0xf
+
 class Environment:
     def __init__(self, *envs):
         self.__env = None
@@ -59,7 +62,7 @@ class Communicate:
 
         self.quiet = False
 
-    def __del(self):
+    def __del__(self):
         self.close()
 
     def connect(self):
@@ -374,6 +377,37 @@ class DlRuntime:
         @property
         def delta_payload(self):
             return self.__payload
+
+class XORShift:
+    @classmethod
+    def encRight(cls, x, t, ad=None, bit=64):
+        return x^((x>>t)&ad if ad else x>>t) & (1<<bit)-1
+
+    @classmethod
+    def encLeft(cls, x, t, ad=None, bit=64):
+        return x^((x<<t)&ad if ad else x<<t) & (1<<bit)-1
+
+    @classmethod
+    def decRight(cls, v, t, ad=None, bit=64):
+        ad = ad or (1<<bit)-1
+        v = [v&ad,v&~ad]
+
+        for i in [1<<j for j in range(bit,-1,-1)]:
+            b = 1 if ad&i else 0
+            v[b] |= ((v[1]>>t)^v[not b])&i
+
+        return v[1]
+
+    @classmethod
+    def decLeft(cls, v, t, ad=None, bit=64):
+        ad = ad or (1<<bit)-1
+        v = [v&ad,v&~ad]
+
+        for i in [1<<j for j in range(bit)]:
+            b = 1 if ad&i else 0
+            v[b] |= ((v[1]<<t)^v[not b])&i
+
+        return v[1]
 
 # for backward compatibility
 def communicate(mode='SOCKET', *args, **kwargs):
