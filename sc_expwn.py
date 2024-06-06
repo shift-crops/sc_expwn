@@ -7,9 +7,10 @@ context(terminal=['tmux', 'splitw', '-v'])
 p = lambda x: pack(x, 'all')
 u = lambda x: unpack(x, 'all')
 invsign = lambda x: unpack(pack(x, 'all'), 'all', signed = x>0)
+split_n = lambda text,n: [text[x:x+n] for x in range(0, len(text), n)]
 
-protect_ptr = lambda x, pdiff = 0: XORShift.encRight(x, 12) ^ pdiff
-reveal_ptr  = lambda x: XORShift.decRight(x, 12) & ~0xf
+protect_ptr = lambda x, pos = None: x ^ (pos or x) >> 12
+reveal_ptr  = lambda x, pos = None: XORShift.decRight(x, 12) & ~0xf if pos is None else protect_ptr(x, pos)
 
 class Environment:
     def __init__(self, *envs):
@@ -20,7 +21,7 @@ class Environment:
 
     def set_item(self, name, **obj):
         if set(obj.keys()) != set(self.env_list):
-            error('Environment : "%s" environment does not match' % name)
+            error(f'Environment : "{name}" environment does not match')
             return
 
         for env in obj:
@@ -28,11 +29,11 @@ class Environment:
 
     def select(self, env=None):
         if env is not None and env not in self.env_list:
-            warn('Environment : "%s" is not defined' % env)
+            warn(f'Environment : "{env}" is not defined')
             env = None
 
         while env is None:
-            sel = raw_input('Select Environment\n%s ...' % str(self.env_list)).strip().decode('utf8')
+            sel = raw_input(f'Select Environment\n{self.env_list} ...').strip().decode('utf8')
             if not sel:
                 env = self.env_list[0]
             elif sel in self.env_list:
@@ -43,7 +44,7 @@ class Environment:
                         env = e
                         break
 
-        info('Environment : set environment "%s"' % env)
+        info(f'Environment : set environment "{env}"')
         for name,obj in getattr(self, env).items():
             setattr(self, name, obj)
         self.__env = env
@@ -74,26 +75,17 @@ class Communicate:
             self.close()
 
         if self.__mode == 'DEBUG':
-            if 'argv' in self.kwargs:
-                argv = self.kwargs['argv']
-                del self.kwargs['argv']
-            else:
-                argv = './argv'
-            conn = gdb.debug(argv, *self.args, **self.kwargs)
+            conn = gdb.debug(self.kwargs.pop('argv', './a.out'), api=True, *self.args, **self.kwargs)
         elif self.__mode == 'SOCKET':
             conn = remote(*self.args, **self.kwargs)
         elif self.__mode == 'PROC':
             conn = process(*self.args, **self.kwargs)
         elif self.__mode == 'SSH':
-            cmd = None
-            if 'run' in self.kwargs:
-                cmd = self.kwargs['run']
-                del self.kwargs['run']
-
+            cmd = self.kwargs.pop('run', None)
             s = ssh(*self.args, **self.kwargs)
             conn = s.run(cmd) if cmd is not None else s.shell()
         else:
-            warn('communicate : mode "%s" is not defined' % self.__mode)
+            warn(f'Communicate : mode "{self.__mode}" is not defined')
             conn = None
 
         self.__conn = conn
@@ -114,7 +106,7 @@ class Communicate:
     def run(self, func, **kwargs):
         return func(self.__conn, **kwargs)
 
-    def bruteforce(self, func, **kwargs):
+    def bruteforce(self, func, catch=(), **kwargs):
         if self.__debug:
             warn('bruteforce : disabled bruteforce in debug mode')
             return self.run(func, **kwargs)
@@ -122,24 +114,33 @@ class Communicate:
         while True:
             try:
                 self.run(func, **kwargs)
-            except:
+            except KeyboardInterrupt:
+                break
+            except (pwnlib.exception.PwnlibException,) + catch:
                 self.connect()
+            except BaseException as e:
+                print(f"Exception: {e}")
+                break
             else:
                 break
 
     def repeat(self, func, succend, *args, **kwargs):
-        rep_result = []
+        fa = kwargs.pop('fixed_arg', ())
 
+        rep_result = []
         for x in product(*args):
-            kwargs['rep_argl'] = x
+            arg = fa + x
             try:
-                self.run(func, **kwargs)
-            except:
+                self.run(func, rep_arg=arg, **kwargs)
+            except pwnlib.exception.PwnlibException:
                 pass
+            except BaseException as e:
+                print(f"Exception: {e}")
+                break
             else:
+                rep_result += [arg]
                 if succend:
-                    return x
-                rep_result += [x]
+                    break
             self.connect()
 
         return rep_result
@@ -147,11 +148,7 @@ class Communicate:
     def repeat_depth(self, func, depth, *args, **kwargs):
         rep_result = []
         for x in product(*args[:depth]):
-            kwargs['rep_argh'] = x
-            res = self.repeat(func, True, *args[depth:], **kwargs)
-            if res:
-                rep_result += [[x, res]]
-                self.connect()
+            rep_result += self.repeat(func, True, *args[depth:], fixed_arg=x, **kwargs)
         return rep_result
 
     def interactive(self, **kwargs):
@@ -281,9 +278,9 @@ class DlRuntime:
 
             r_info = int((addr_buf_dynsym - self.__addr['dynsym']) / align)
             if self.__addr['version'] is not None:
-                debug('DlRuntime : check gnu version : [0x%08x] & 0x7fff' % (self.__addr['version'] + r_info*2))
+                debug('DlRuntime : check gnu version : [0x{:08x}] & 0x7fff'.format(self.__addr['version'] + r_info*2))
             else:
-                debug('DlRuntime : check if link_map->l_info[VERSYMIDX (DT_VERSYM)] == NULL (offset : %x)' % (0x1c8 if self.__arch == 64 else 0xe4))
+                debug('DlRuntime : check if link_map->l_info[VERSYMIDX (DT_VERSYM)] == NULL (offset: {:x})'.format(0x1c8 if self.__arch == 64 else 0xe4))
 
             for s,a in self.__sym_reloc.items():
                 if self.__arch == 64:
@@ -299,9 +296,9 @@ class DlRuntime:
                 r_info  += 1
 
             if pad_dynsym:
-                debug('DlRuntime : Auto padding dynsym size is 0x%d bytes' % pad_dynsym)
+                debug(f'DlRuntime : Auto padding dynsym size is 0x{pad_dynsym:x} bytes')
             if pad_relplt:
-                debug('DlRuntime : Auto padding relplt size is 0x%d bytes' % pad_relplt)
+                debug(f'DlRuntime : Auto padding relplt size is 0x{pad_relplt:x} bytes')
 
             self.__payload =  dynstr + b'@'*(pad_dynsym) + dynsym + b'@'*(pad_relplt) + relplt
 
@@ -358,7 +355,7 @@ class DlRuntime:
             symtab += pack(self.addr_got_basefunc - (8 if self.__arch == 64 else 4))                # .dynsym
             symtab  = symtab.ljust(0x10, b'\x00')
 
-            debug('DlRuntime : check sym->st_other (0x%08x)' % (self.addr_got_basefunc + (-3 if self.__arch == 64 else 0x9)))
+            debug('DlRuntime : check sym->st_other (0x{:08x})'.format(self.addr_got_basefunc + (-3 if self.__arch == 64 else 0x9)))
 
             reloc   = pack(0x17)
             reloc  += pack(addr_relplt - self.reloc_offset * (0x18 if self.__arch == 64 else 1))    # .rela.plt
